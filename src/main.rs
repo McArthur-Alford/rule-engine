@@ -1,4 +1,5 @@
 // Sparse Array Entity-Component Store:
+use anymap::AnyMap;
 
 type EntityId = usize;
 
@@ -75,6 +76,15 @@ impl<T: Component + Eq> Pool<T> {
         self.entity_list.push(entityId);
         self.component_list.push(component);
     }
+
+    // Returns the length of entity_list/component_list (they should be the same)
+    fn len(&mut self) -> usize {
+        self.entity_list.len()
+    }
+}
+
+struct EntityStore {
+    map: AnyMap,
 }
 
 // Spatial stuff using logic programming:
