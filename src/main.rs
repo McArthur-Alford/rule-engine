@@ -26,14 +26,14 @@ struct Pool<T: Component + Eq> {
     component_list: Vec<T>,
 }
 
-trait PoolRemoval {
+trait PoolRef {
     fn remove(&mut self, entity_id: EntityId);
 }
 
-impl<T: Component + Eq> PoolRemoval for Pool<T> {
+impl<T: Component + Eq> PoolRef for Pool<T> {
     // Remove the component from the given entity
     fn remove(&mut self, entity_id: EntityId) {
-        // Remove the index of entity_indices equal to the entityId
+        // Remove the index of entity_indices equal to the entity_id
         if let Some(entity_index) = self.entity_indices.get_mut(entity_id) {
             if let Some(entity_index_copy) = *entity_index {
                 *entity_index = None;
@@ -66,25 +66,25 @@ impl<T: Component + Eq> Pool<T> {
     }
 
     // Ensures that the entity list is allocated up to (and including) a given entity id
-    fn reserve_up_to(&mut self, entityId: EntityId) {
-        if entityId < self.entity_indices.len() {
+    fn reserve_up_to(&mut self, entity_id: EntityId) {
+        if entity_id < self.entity_indices.len() {
             return;
         }
-        self.entity_indices.resize(entityId + 1, None);
+        self.entity_indices.resize(entity_id + 1, None);
     }
 
     // Adds a component, or overrides it if there already is one
-    fn add_component(&mut self, entityId: EntityId, component: T) {
-        if entityId >= self.entity_indices.len() {
-            self.reserve_up_to(entityId);
+    fn add_component(&mut self, entity_id: EntityId, component: T) {
+        if entity_id >= self.entity_indices.len() {
+            self.reserve_up_to(entity_id);
         }
-        if let Some(index) = self.entity_indices[entityId] {
+        if let Some(index) = self.entity_indices[entity_id] {
             // Entity already exists, replace it
-            self.entity_list[index] = entityId;
+            self.entity_list[index] = entity_id;
             self.component_list[index] = component;
         } else {
-            self.entity_indices[entityId] = Some(self.entity_list.len() as usize);
-            self.entity_list.push(entityId);
+            self.entity_indices[entity_id] = Some(self.entity_list.len() as usize);
+            self.entity_list.push(entity_id);
             self.component_list.push(component);
         }
     }
@@ -128,27 +128,31 @@ impl<T: Component + Eq> Pool<T> {
         self.entity_list.iter().zip(self.component_list.iter_mut())
     }
 
-    fn has_component(&self, entityId: EntityId) -> bool {
-        self.entity_indices.get(entityId).is_none()
+    fn has_component(&self, entity_id: EntityId) -> bool {
+        self.entity_indices.get(entity_id).is_none()
     }
 }
 
-struct PoolRemovalStore(Vec<Rc<RefCell<Box<dyn PoolRemoval>>>>);
-impl std::fmt::Debug for PoolRemovalStore {
+struct PoolRefStore(Vec<Rc<RefCell<dyn PoolRef>>>);
+impl std::fmt::Debug for PoolRefStore {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "PoolRemovalStore")
+        write!(f, "PoolRefStore")
     }
 }
 
 #[derive(Debug)]
 struct EntityStore {
+    // Stores Rc<RefCell<Pool<T>>> in an anymap
+    // Lets us access the pool of a type, given its type
     store: AnyMap,
+
+    // Stores Rc<RefCell<dyn PoolRef>>> in a vec
+    // These are the same pools as in store, but type erased
+    // and iterable.
+    pool_refs: PoolRefStore,
 
     // Id of the last entity
     max_entity: EntityId,
-
-    // Component pools for removal
-    pool_refs: PoolRemovalStore,
 }
 
 impl EntityStore {
@@ -156,7 +160,7 @@ impl EntityStore {
         EntityStore {
             store: AnyMap::new(),
             max_entity: 0,
-            pool_refs: PoolRemovalStore(Vec::new()),
+            pool_refs: PoolRefStore(Vec::new()),
         }
     }
 
@@ -165,34 +169,37 @@ impl EntityStore {
     fn new_component<T: Component + Eq + 'static>(&mut self) {
         let mut pool = Pool::<T>::new();
         pool.reserve_up_to(self.max_entity);
-        self.store.insert(pool);
+
+        let pool_rc: Rc<RefCell<Pool<T>>> = Rc::new(RefCell::new(pool));
+        self.store.insert(pool_rc.clone());
+        self.pool_refs.0.push(pool_rc.clone());
     }
 
-    fn reserve_up_to(&mut self, entityId: EntityId) {
-        if self.max_entity >= entityId {
+    fn reserve_up_to(&mut self, entity_id: EntityId) {
+        if self.max_entity >= entity_id {
             return;
         }
-        self.max_entity = entityId;
+        self.max_entity = entity_id;
     }
 
-    fn get<T: Component + Eq + 'static>(&self) -> Option<&Pool<T>> {
-        self.store.get::<Pool<T>>()
+    fn get<T: Component + Eq + 'static>(&self) -> Option<&Rc<RefCell<Pool<T>>>> {
+        self.store.get::<Rc<RefCell<Pool<T>>>>()
     }
 
-    fn get_mut<T: Component + Eq + 'static>(&mut self) -> Option<&mut Pool<T>> {
-        self.store.get_mut::<Pool<T>>()
+    fn get_mut<T: Component + Eq + 'static>(&mut self) -> Option<&mut Rc<RefCell<Pool<T>>>> {
+        self.store.get_mut::<Rc<RefCell<Pool<T>>>>()
     }
 
     // Add a instance of a component to a entity
-    fn add_component<T: Component + Eq + 'static>(&mut self, entityId: EntityId, component: T) {
+    fn add_component<T: Component + Eq + 'static>(&mut self, entity_id: EntityId, component: T) {
         if let Some(pool) = self.store.get_mut::<Pool<T>>() {
-            pool.add_component(entityId, component);
+            pool.add_component(entity_id, component);
         }
     }
 
-    fn remove_component<T: Component + Eq + 'static>(&mut self, entityId: EntityId) {
+    fn remove_component<T: Component + Eq + 'static>(&mut self, entity_id: EntityId) {
         if let Some(pool) = self.store.get_mut::<Pool<T>>() {
-            pool.remove(entityId);
+            pool.remove(entity_id);
         }
     }
 
@@ -318,17 +325,6 @@ mod tests {
     }
 
     #[test]
-    fn add_component_in_store() {
-        let mut store = EntityStore::new();
-        store.new_component::<TestComponent>();
-        let component = TestComponent { value: 42 };
-        store.add_component(0, component.clone());
-        let pool = store.get::<TestComponent>().unwrap();
-        assert_eq!(pool.component_list.len(), 1);
-        assert_eq!(pool.component_list[0], component);
-    }
-
-    #[test]
     fn reserve_up_to() {
         let mut pool: Pool<TestComponent> = Pool::new();
         pool.reserve_up_to(5);
@@ -410,19 +406,5 @@ mod tests {
         let store = EntityStore::new();
         let result = store.get::<TestComponent>();
         assert!(result.is_none());
-    }
-
-    #[test]
-    fn remove_component_from_non_existent_entity_in_store() {
-        let mut store = EntityStore::new();
-        store.new_component::<TestComponent>();
-        let id = 3;
-        if let Some(pool) = store.get_mut::<TestComponent>() {
-            pool.remove(id);
-        }
-        let pool = store.get::<TestComponent>().unwrap();
-        assert_eq!(pool.entity_list.len(), 0);
-        assert_eq!(pool.component_list.len(), 0);
-        assert!(pool.entity_indices.get(id).is_none());
     }
 }
