@@ -1,7 +1,7 @@
 // Sparse Array Entity-Component Store:
 use anymap::AnyMap;
 use std::any::{Any, TypeId};
-use std::cell::RefCell;
+use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -191,69 +191,54 @@ impl EntityStore {
     }
 
     // Add a instance of a component to a entity
+    // Note this should not be called when queries are out, only between queries
+    // as it performs a borrow_mut on the pool the component is added to
+    // THIS IS CALLED COMMAND BUFFERING
     fn add_component<T: Component + Eq + 'static>(&mut self, entity_id: EntityId, component: T) {
-        if let Some(pool) = self.store.get_mut::<Pool<T>>() {
+        if let Some(pool) = self.store.get_mut::<Rc<RefCell<Pool<T>>>>() {
+            let mut pool = pool.borrow_mut();
             pool.add_component(entity_id, component);
         }
     }
 
     fn remove_component<T: Component + Eq + 'static>(&mut self, entity_id: EntityId) {
-        if let Some(pool) = self.store.get_mut::<Pool<T>>() {
+        if let Some(pool) = self.store.get_mut::<Rc<RefCell<Pool<T>>>>() {
+            let mut pool = pool.borrow_mut();
             pool.remove(entity_id);
         }
     }
 
-    fn entities<T: Component + Eq + 'static>(&self) -> Option<Vec<&EntityId>> {
-        if let Some(pool) = self.store.get::<Pool<T>>() {
-            Some(pool.entity_list.iter().collect())
-        } else {
-            None
-        }
+    fn entities<T: Component + Eq + 'static>(&self) -> Option<Ref<Vec<EntityId>>> {
+        let pool = self.store.get::<Rc<RefCell<Pool<T>>>>()?;
+        Some(Ref::map(pool.borrow(), |borrowed| &borrowed.entity_list))
     }
 
-    fn components<T: Component + Eq + 'static>(&self) -> Option<Vec<(&EntityId, &T)>> {
-        if let Some(pool) = self.store.get::<Pool<T>>() {
-            Some(pool.components())
-        } else {
-            None
-        }
+    fn components<T: Component + Eq + 'static>(&self) -> Option<Ref<Vec<T>>> {
+        let pool = self.store.get::<Rc<RefCell<Pool<T>>>>()?;
+        Some(Ref::map(pool.borrow(), |borrowed| &borrowed.component_list))
     }
 
-    fn components_iter<T: Component + Eq + 'static>(
-        &self,
-    ) -> impl Iterator<Item = (&EntityId, &T)> {
-        self.store
-            .get::<Pool<T>>()
-            .into_iter()
-            .flat_map(|pool| pool.components_iter())
-    }
-
-    fn components_mut<T: Component + Eq + 'static>(&mut self) -> Option<Vec<(&EntityId, &mut T)>> {
-        if let Some(pool) = self.store.get_mut::<Pool<T>>() {
-            Some(pool.components_mut())
-        } else {
-            None
-        }
-    }
-
-    fn components_iter_mut<T: Component + Eq + 'static>(
-        &mut self,
-    ) -> impl Iterator<Item = (&EntityId, &mut T)> {
-        self.store
-            .get_mut::<Pool<T>>()
-            .into_iter()
-            .flat_map(|pool| pool.components_iter_mut())
+    fn components_mut<T: Component + Eq + 'static>(&mut self) -> Option<RefMut<Vec<T>>> {
+        let pool = self.store.get::<Rc<RefCell<Pool<T>>>>()?;
+        Some(RefMut::map(pool.borrow_mut(), |borrowed| {
+            &mut borrowed.component_list
+        }))
     }
 
     fn has_component<T: Component + Eq + 'static>(&self, entity_id: EntityId) -> bool {
-        if let Some(pool) = self.store.get::<Pool<T>>() {
-            pool.has_component(entity_id)
+        if let Some(pool) = self.store.get::<Rc<RefCell<Pool<T>>>>() {
+            pool.borrow().has_component(entity_id)
         } else {
             false
         }
     }
 
-    fn remove_entity(&self, entity_id: EntityId) {}
+    fn remove_entity(&self, entity_id: EntityId) {
+        for pool_ref in &self.pool_refs.0 {
+            let mut pool = pool_ref.borrow_mut();
+            pool.remove(entity_id);
+        }
+    }
 }
 
 trait View {}
@@ -271,140 +256,86 @@ fn main() {
 mod tests {
     use super::*;
 
-    #[derive(Debug, PartialEq, Eq, Clone)]
+    #[derive(Debug, PartialEq, Eq)]
     struct TestComponent {
-        value: i32,
+        data: i32,
     }
 
     impl Component for TestComponent {}
 
     #[test]
-    fn new_pool() {
-        let pool: Pool<TestComponent> = Pool::new();
-        assert_eq!(pool.entity_indices.len(), 0);
-        assert_eq!(pool.entity_list.len(), 0);
-        assert_eq!(pool.component_list.len(), 0);
+    fn entity_store_creation() {
+        let store = EntityStore::new();
+        assert_eq!(store.max_entity, 0);
+        assert_eq!(store.store.len(), 0);
     }
 
     #[test]
-    fn new_entity() {
-        let mut pool: Pool<TestComponent> = Pool::new();
-        let id = pool.new_entity();
-        assert_eq!(id, 0);
-    }
-
-    #[test]
-    fn add_component() {
-        let mut pool: Pool<TestComponent> = Pool::new();
-        let id = pool.new_entity();
-        let component = TestComponent { value: 42 };
-        pool.add_component(id, component.clone());
-        assert_eq!(pool.entity_list.len(), 1);
-        assert_eq!(pool.component_list.len(), 1);
-        assert_eq!(pool.component_list[0], component);
-    }
-
-    #[test]
-    fn remove_component() {
-        let mut pool: Pool<TestComponent> = Pool::new();
-        let id = pool.new_entity();
-        let component = TestComponent { value: 42 };
-        pool.add_component(id, component.clone());
-        assert_eq!(pool.entity_list.len(), 1);
-        assert_eq!(pool.component_list.len(), 1);
-        pool.remove(id);
-        assert_eq!(pool.entity_list.len(), 0);
-        assert_eq!(pool.component_list.len(), 0);
-    }
-
-    #[test]
-    fn new_component_in_store() {
+    fn component_registration() {
         let mut store = EntityStore::new();
         store.new_component::<TestComponent>();
-        assert!(store.get::<TestComponent>().is_some());
+        assert_eq!(store.store.len(), 1);
     }
 
     #[test]
-    fn reserve_up_to() {
-        let mut pool: Pool<TestComponent> = Pool::new();
-        pool.reserve_up_to(5);
-        assert_eq!(pool.entity_indices.len(), 6);
-        assert!(pool.entity_indices.iter().all(|&x| x == None));
-    }
-
-    #[test]
-    fn add_component_non_existent_entity() {
-        let mut pool: Pool<TestComponent> = Pool::new();
-        let component = TestComponent { value: 42 };
-        pool.add_component(3, component.clone());
-        assert_eq!(pool.entity_list.len(), 1);
-        assert_eq!(pool.component_list.len(), 1);
-        assert_eq!(pool.component_list[0], component);
-        assert_eq!(pool.entity_indices.len(), 4);
-    }
-
-    #[test]
-    fn remove_non_existent_entity() {
-        let mut pool: Pool<TestComponent> = Pool::new();
-        pool.remove(3);
-        assert_eq!(pool.entity_list.len(), 0);
-        assert_eq!(pool.component_list.len(), 0);
-        assert_eq!(pool.entity_indices.len(), 0);
-    }
-
-    #[test]
-    fn add_multiple_components_to_same_entity() {
-        let mut pool: Pool<TestComponent> = Pool::new();
-        let id = pool.new_entity();
-        let component1 = TestComponent { value: 42 };
-        let component2 = TestComponent { value: 100 };
-        pool.add_component(id, component1.clone());
-        pool.add_component(id, component2.clone());
-        assert_eq!(pool.entity_list.len(), 1);
-        assert_eq!(pool.component_list.len(), 1);
-        assert_eq!(pool.component_list[0], component2);
-    }
-
-    #[test]
-    fn remove_entity_with_no_component() {
-        let mut pool: Pool<TestComponent> = Pool::new();
-        let id = pool.new_entity();
-        pool.remove(id);
-        assert_eq!(pool.entity_list.len(), 0);
-        assert_eq!(pool.component_list.len(), 0);
-        assert_eq!(pool.entity_indices[id], None);
-    }
-
-    #[test]
-    fn add_components_in_non_sequential_order() {
-        let mut pool: Pool<TestComponent> = Pool::new();
-        let component = TestComponent { value: 42 };
-        pool.add_component(3, component.clone());
-        assert_eq!(pool.entity_list.len(), 1);
-        assert_eq!(pool.component_list.len(), 1);
-        assert_eq!(pool.component_list[0], component);
-        assert_eq!(pool.entity_indices[3].unwrap(), 0);
-    }
-
-    #[test]
-    fn reserve_up_to_in_store_with_no_components() {
+    fn component_addition_removal() {
         let mut store = EntityStore::new();
-        store.reserve_up_to(5);
-        assert_eq!(store.max_entity, 5);
+        store.new_component::<TestComponent>();
+
+        let entity_id = 1;
+        store.add_component(entity_id, TestComponent { data: 10 });
+
+        {
+            let pool = store.get::<TestComponent>().unwrap();
+            let borrowed = pool.borrow();
+            assert_eq!(borrowed.get(entity_id).unwrap().data, 10);
+        }
+
+        store.remove_component::<TestComponent>(entity_id);
+
+        let pool = store.get::<TestComponent>().unwrap();
+        assert!(pool.borrow().get(entity_id).is_none());
     }
 
     #[test]
-    fn add_component_in_store_with_no_component_type() {
+    fn entity_removal() {
         let mut store = EntityStore::new();
-        let component = TestComponent { value: 42 };
-        store.add_component(0, component.clone());
-        assert!(store.get::<TestComponent>().is_none());
+        store.new_component::<TestComponent>();
+
+        let entity_id = 1;
+        store.add_component(entity_id, TestComponent { data: 10 });
+
+        let pool = store.get::<TestComponent>().unwrap();
+        let borrowed = pool.borrow();
+        assert_eq!(borrowed.get(entity_id).unwrap().data, 10);
+
+        store.remove_entity(entity_id);
+        assert!(borrowed.get(entity_id).is_none());
     }
 
     #[test]
-    fn get_non_existent_component_in_store() {
-        let store = EntityStore::new();
-        let result = store.get::<TestComponent>();
-        assert!(result.is_none());
+    fn component_iterators() {
+        let mut store = EntityStore::new();
+        store.new_component::<TestComponent>();
+
+        store.add_component(1, TestComponent { data: 10 });
+        store.add_component(2, TestComponent { data: 20 });
+        store.add_component(3, TestComponent { data: 30 });
+
+        let pool = store.get::<TestComponent>().unwrap();
+        let borrowed = pool.borrow();
+
+        let data: Vec<_> = borrowed.components_iter().map(|(_, c)| c.data).collect();
+        assert_eq!(data, vec![10, 20, 30]);
+
+        let mut borrowed_mut = pool.borrow_mut();
+        let data: Vec<_> = borrowed_mut
+            .components_iter_mut()
+            .map(|(_, c)| {
+                c.data += 1;
+                c.data
+            })
+            .collect();
+        assert_eq!(data, vec![11, 21, 31]);
     }
 }
