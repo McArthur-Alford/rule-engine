@@ -148,7 +148,7 @@ struct EntityStore {
     max_entity: EntityId,
 
     // Component pools for removal
-    component_pools: PoolRemovalStore,
+    pool_refs: PoolRemovalStore,
 }
 
 impl EntityStore {
@@ -156,7 +156,7 @@ impl EntityStore {
         EntityStore {
             store: AnyMap::new(),
             max_entity: 0,
-            component_pools: Vec::new(),
+            pool_refs: PoolRemovalStore(Vec::new()),
         }
     }
 
